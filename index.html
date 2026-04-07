@@ -2328,12 +2328,13 @@
         return newSheet.id;
       }
 
-      async function appendRowToSheet(sheetId, rowData) {
-        await api(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Sheet1!A1:append?valueInputOption=USER_ENTERED`, {
+     async function appendRowToSheet(sheetId, rowData) {
+        await api(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/A1:append?valueInputOption=USER_ENTERED`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ values: [rowData] })
         });
+      
       }
       // ── MASTER TOPICS ──
       async function loadMasterTopics() {
