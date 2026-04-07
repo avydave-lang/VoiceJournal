@@ -2998,8 +2998,18 @@
           const text = $('qn-ta').value.trim();
           const words = text.split(/\s+/).filter(Boolean).length;
           const now = new Date(), ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          
+          // 1. Save JSON to Drive
           const entry = { text, duration: 0, audioFileId: null, createdAt: now.toISOString(), topic, subtopic: sub || '', mood: S.qnMood, wordCount: words, isTextOnly: true };
           await uploadMultipart({ name: `vj_entry_${ts}.json`, parents: [S.folderId], mimeType: 'application/json' }, new Blob([JSON.stringify(entry)], { type: 'application/json' }));
+          
+          // 2. NEW: Save to Google Sheets
+          const sheetId = await getOrCreateSheet();
+          const dateStr = now.toLocaleDateString('en-US');
+          const timeStr = now.toLocaleTimeString('en-US');
+          const fullTopic = sub ? `${topic} > ${sub}` : topic;
+          await appendRowToSheet(sheetId, [fullTopic, text, dateStr, timeStr]);
+
           ensureMasterEntry(topic, sub).catch(() => { });
           toast('Note saved ✓', 'success'); S.qnMood = null;
           showScreen('home'); await loadEntries(); renderHomeExtras();
