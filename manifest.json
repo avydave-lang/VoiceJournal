@@ -1,0 +1,17 @@
+{
+  "name": "VoiceJournal",
+  "short_name": "VoiceJournal",
+  "description": "Your private voice diary, stored in Google Drive",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0D0D1A",
+  "theme_color": "#0D0D1A",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='42' fill='%237B61FF'/><path d='M96 52a20 20 0 0 1 20 20v28a20 20 0 0 1-40 0V72a20 20 0 0 1 20-20zm32 44a4 4 0 0 1 8 0 40 40 0 0 1-36 39.8V148h12a4 4 0 0 1 0 8H80a4 4 0 0 1 0-8h12v-12.2A40 40 0 0 1 56 96a4 4 0 0 1 8 0 32 32 0 0 0 64 0z' fill='white'/>",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}
