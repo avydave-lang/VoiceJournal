@@ -1783,6 +1783,20 @@
       font-size: 28px;
       margin-bottom: 10px
     }
+    /* ── WHISPER BANNER ── */
+    .whisper-banner {
+      display: none;
+      background: var(--surf2);
+      border: 1px solid var(--bdr2);
+      border-radius: var(--r1);
+      padding: 14px 16px;
+      margin-bottom: 16px
+    }
+    .whisper-banner.active { display: block }
+    .whisper-banner-title { font-size: 13px; font-weight: 600; color: var(--plight); margin-bottom: 4px }
+    .whisper-banner-sub { font-size: 12px; color: var(--t2) }
+    .whisper-prog-track { margin-top: 10px; height: 3px; background: var(--bdr2); border-radius: 2px; overflow: hidden }
+    .whisper-prog-fill { height: 100%; background: linear-gradient(90deg, var(--p), var(--plight)); width: 0%; transition: width .4s ease }
   </style>
 </head>
 
@@ -1951,6 +1965,12 @@
             <input type="range" class="audio-progress" id="review-progress" min="0" max="100" value="0">
             <div class="audio-time" id="review-time">0:00 / 0:00</div>
           </div>
+        </div>
+        <!-- Whisper local transcription status -->
+        <div class="whisper-banner" id="whisper-banner">
+          <div class="whisper-banner-title" id="whisper-title">🤖 Loading AI model…</div>
+          <div class="whisper-banner-sub" id="whisper-sub">First use: ~40MB download, then cached forever</div>
+          <div class="whisper-prog-track"><div class="whisper-prog-fill" id="whisper-prog"></div></div>
         </div>
         <!-- Topic / Subtopic -->
         <div class="topic-row" id="topic-row">
@@ -2588,6 +2608,79 @@
         });
       }
 
+      // ── LOCAL WHISPER TRANSCRIPTION ──
+      let _whisperPipe = null;
+
+      async function runWhisper(blob) {
+        const banner = $('whisper-banner');
+        const title  = $('whisper-title');
+        const sub    = $('whisper-sub');
+        const prog   = $('whisper-prog');
+
+        banner.classList.add('active');
+        title.textContent = '🤖 Loading AI model…';
+        sub.textContent   = 'First use: ~40MB download, then cached on your device';
+        prog.style.width  = '5%';
+
+        try {
+          if (!_whisperPipe) {
+            const { pipeline, env } = await import(
+              'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js'
+            );
+            env.allowLocalModels = false;
+            _whisperPipe = await pipeline(
+              'automatic-speech-recognition',
+              'Xenova/whisper-tiny',
+              {
+                progress_callback: info => {
+                  if (info.status === 'downloading') {
+                    const pct = info.total
+                      ? Math.round((info.loaded / info.total) * 85)
+                      : 10;
+                    prog.style.width = pct + '%';
+                    const mb = ((info.loaded || 0) / 1e6).toFixed(1);
+                    sub.textContent = `Downloading… ${mb} MB`;
+                  }
+                }
+              }
+            );
+          }
+
+          title.textContent = '🎙 Transcribing your audio…';
+          sub.textContent   = 'Running entirely on your device — no internet needed';
+          prog.style.width  = '90%';
+
+          const blobUrl  = URL.createObjectURL(blob);
+          const langCode = (S.lang || 'en-US').split('-')[0].toLowerCase();
+          const result   = await _whisperPipe(blobUrl, {
+            language: langCode === 'en' ? 'english' : langCode,
+            task: 'transcribe',
+            chunk_length_s: 30
+          });
+          URL.revokeObjectURL(blobUrl);
+
+          prog.style.width = '100%';
+          const text = (result.text || '').trim();
+          $('review-textarea').value = text;
+          S.transcript = text;
+          S.transcriptionDeferred = false;
+          updateWordCount();
+
+          title.textContent = '✅ Transcription complete';
+          sub.textContent   = 'Edit the text below if needed';
+          setTimeout(() => {
+            banner.classList.remove('active');
+            prog.style.width = '0%';
+          }, 1500);
+
+        } catch (err) {
+          console.error('Whisper error:', err);
+          title.textContent = '⚠️ Transcription failed';
+          sub.textContent   = err.message || 'You can still type your thoughts below';
+          prog.style.width  = '0%';
+        }
+      }
+
       $('btn-stop').addEventListener('click', async () => {
         $('btn-stop').disabled = true;
         try {
@@ -2596,6 +2689,10 @@
           S.currentAudioDuration = duration;
           setupReviewScreen(blob, duration);
           showScreen('review');
+          // If live STT captured nothing, run local Whisper automatically
+          if (!S.transcript.trim()) {
+            runWhisper(blob);
+          }
         } finally { $('btn-stop').disabled = false; }
       });
 
