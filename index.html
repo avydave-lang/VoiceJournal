@@ -2125,7 +2125,7 @@
       // CONFIG — Replace CLIENT_ID after Google Cloud setup
       // ═══════════════════════════════════════════════
       const CLIENT_ID = '673931194781-855viqc1ts1pr9k6vfggsvasikdq392u.apps.googleusercontent.com';
-      const SCOPE = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets';
+      const SCOPE = 'https://www.googleapis.com/auth/drive.file';
       const FOLDER_NAME = 'VoiceJournal';
 
       const QUOTES = [
@@ -2185,6 +2185,7 @@
         token: null, folderId: null, entries: [],
         currentEntryData: null, currentAudioBlob: null,
         isRecording: false, recStart: null, recInterval: null,
+        transcriptionDeferred: false,
         recognition: null, mediaRecorder: null, audioChunks: [],
         transcript: '', viewingEntry: null,
         audioCtx: null, analyser: null, animFrame: null,
@@ -2300,42 +2301,7 @@
           { method: 'PATCH', headers: { 'Content-Type': `multipart/related; boundary="${boundary}"` }, body }
         );
       }
-        // ── GOOGLE SHEETS API ──
-      async function getOrCreateSheet() {
-        // 1. Check if the sheet already exists in our folder
-        const q = encodeURIComponent(`'${S.folderId}' in parents and name='VoiceJournal_Data' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
-        const r = await api(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`);
-        const d = await r.json();
-        
-        if (d.files.length) {
-          return d.files[0].id; // Return existing sheet ID
-        }
 
-        // 2. If it doesn't exist, create it inside the VoiceJournal folder
-        const createRes = await api('https://www.googleapis.com/drive/v3/files', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            name: 'VoiceJournal_Data', 
-            mimeType: 'application/vnd.google-apps.spreadsheet',
-            parents: [S.folderId] 
-          })
-        });
-        const newSheet = await createRes.json();
-
-        // 3. Add the Header Row to the brand new sheet
-        await appendRowToSheet(newSheet.id, ['Topic', 'Text', 'Date', 'Time']);
-        return newSheet.id;
-      }
-
-     async function appendRowToSheet(sheetId, rowData) {
-        await api(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/A1:append?valueInputOption=USER_ENTERED`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ values: [rowData] })
-        });
-      
-      }
       // ── MASTER TOPICS ──
       async function loadMasterTopics() {
         const q = encodeURIComponent(`'${S.folderId}' in parents and name='vj_master_topics.json' and trashed=false`);
@@ -2469,7 +2435,7 @@
         <div class="ec-date">${formatCardDate(e.createdTime)}</div>
         ${e.topic ? topicChipsHTML(e.topic, e.subtopic) : ''}
         <div class="ec-preview" style="margin-top:${e.topic ? '6px' : '0'}">${e.text ? e.text.slice(0, 120) : '(No transcription)'}</div>
-        <div class="ec-meta">${e.mood != null ? `<span class="ec-mood">${MOODS[e.mood]}</span>` : ''}<span class="ec-dur">🕐 ${fmtDuration(e.duration) || (e.isTextOnly ? 'note' : '–')}</span>${words ? `<span class="ec-dur">${words}w</span>` : ''}</div>
+        <div class="ec-meta">${e.mood != null ? `<span class="ec-mood">${MOODS[e.mood]}</span>` : ''}${e.needsTranscription ? `<span class="ec-dur" style="color:var(--rec)">⏳ Needs transcription</span>` : ''}<span class="ec-dur">🕐 ${fmtDuration(e.duration) || (e.isTextOnly ? 'note' : '–')}</span>${words ? `<span class="ec-dur">${words}w</span>` : ''}</div>
       </div>
       <div class="ec-play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
     `;
@@ -2552,11 +2518,15 @@
 
       function startRecognition() {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SR) { $('live-interim').textContent = '(Speech recognition not available on this browser)'; return; }
+        if (!SR) {
+          $('live-interim').textContent = 'Live transcription not available — audio is still being recorded and saved.';
+          S.transcriptionDeferred = true;
+          return;
+        }
         S.recognition = new SR();
         S.recognition.continuous = true;
         S.recognition.interimResults = true;
-        S.recognition.lang = navigator.language || 'en-US';
+        S.recognition.lang = S.lang || navigator.language || 'en-US';
 
         $('live-tx').textContent = '';
         $('live-interim').textContent = 'Listening…';
@@ -2572,8 +2542,26 @@
           const tx = $('live-tx-wrap');
           tx.scrollTop = tx.scrollHeight;
         };
-        S.recognition.onerror = ev => { if (ev.error !== 'aborted') console.warn('SR error:', ev.error); };
-        S.recognition.onend = () => { if (S.isRecording) { try { S.recognition.start(); } catch (e) { } } };
+        S.recognition.onerror = ev => {
+          if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+            $('live-interim').textContent = 'Microphone permission lost. Audio is still recording. Re-allow mic in browser settings and tap record again.';
+            S.transcriptionDeferred = true;
+          } else if (ev.error === 'network') {
+            $('live-interim').textContent = 'Network error — transcription paused. Audio is still recording.';
+          } else if (ev.error !== 'aborted' && ev.error !== 'no-speech') {
+            console.warn('SR error:', ev.error);
+          }
+        };
+        // Android Chrome needs ~300ms gap before restarting or it silently dies
+        S.recognition.onend = () => {
+          if (S.isRecording) {
+            setTimeout(() => {
+              if (S.isRecording && S.recognition) {
+                try { S.recognition.start(); } catch (e) { }
+              }
+            }, 300);
+          }
+        };
         try { S.recognition.start(); } catch (e) { }
       }
 
@@ -2615,7 +2603,7 @@
 
       function discardRecording() {
         stopAllRecording();
-        S.currentAudioBlob = null; S.transcript = '';
+        S.currentAudioBlob = null; S.transcript = ''; S.transcriptionDeferred = false;
         if (S.reviewAudioUrl) { URL.revokeObjectURL(S.reviewAudioUrl); S.reviewAudioUrl = null; }
         showScreen('home');
       }
@@ -2779,53 +2767,31 @@
 
       $('btn-review-back').addEventListener('click', discardRecording);
 
-     $('btn-save').addEventListener('click', async () => {
+      $('btn-save').addEventListener('click', async () => {
         const topic = $('topic-input').value.trim();
         const subtopic = $('subtopic-input').value.trim();
         if (!topic) { $('topic-required').style.display = 'block'; $('topic-input').focus(); return; }
-        
         const btn = $('btn-save');
         btn.disabled = true; btn.textContent = 'Saving…';
-        
         try {
           const text = $('review-textarea').value.trim();
           const words = text.split(/\s+/).filter(Boolean).length;
           const now = new Date();
           const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-          
-          // 1. Upload Audio File
           const ext = S.currentAudioBlob.type.includes('mp4') ? 'm4a' : 'webm';
           const audioId = await uploadMultipart(
             { name: `vj_audio_${ts}.${ext}`, parents: [S.folderId], mimeType: S.currentAudioBlob.type },
             S.currentAudioBlob
           );
-
-          // 2. Save JSON Metadata (Keeping this for your app's history view)
-          const entry = { text, duration: S.currentAudioDuration, audioFileId: audioId, createdAt: now.toISOString(), topic, subtopic: subtopic || '', mood: S.mood, wordCount: words, isTextOnly: false };
+          const needsTranscription = !text || S.transcriptionDeferred;
+          const entry = { text, duration: S.currentAudioDuration, audioFileId: audioId, createdAt: now.toISOString(), topic, subtopic: subtopic || '', mood: S.mood, wordCount: words, isTextOnly: false, needsTranscription };
           await uploadMultipart({ name: `vj_entry_${ts}.json`, parents: [S.folderId], mimeType: 'application/json' }, new Blob([JSON.stringify(entry)], { type: 'application/json' }));
-          
-          // 3. NEW: Save to Google Sheet!
-          const sheetId = await getOrCreateSheet();
-          const dateStr = now.toLocaleDateString('en-US');
-          const timeStr = now.toLocaleTimeString('en-US');
-          const fullTopic = subtopic ? `${topic} > ${subtopic}` : topic; // Combines topic and subtopic nicely
-          
-          await appendRowToSheet(sheetId, [fullTopic, text, dateStr, timeStr]);
-
-          // 4. Cleanup and Reset UI
           ensureMasterEntry(topic, subtopic).catch(() => { });
-          toast('Saved to Drive & Sheets ✓', 'success');
+          toast('Entry saved ✓', 'success');
           if (S.reviewAudioUrl) { URL.revokeObjectURL(S.reviewAudioUrl); S.reviewAudioUrl = null; }
-          S.currentAudioBlob = null; S.transcript = ''; S.mood = null;
-          
-          showScreen('home'); 
-          await loadEntries(); 
-          renderHomeExtras();
-        } catch (e) { 
-          toast('Save failed: ' + e.message, 'error'); 
-          btn.disabled = false; 
-          btn.textContent = 'Save to Drive'; 
-        }
+          S.currentAudioBlob = null; S.transcript = ''; S.mood = null; S.transcriptionDeferred = false;
+          showScreen('home'); await loadEntries(); renderHomeExtras();
+        } catch (e) { toast('Save failed: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Save to Drive'; }
       });
 
       // ── ENTRY DETAIL ──
@@ -2999,18 +2965,8 @@
           const text = $('qn-ta').value.trim();
           const words = text.split(/\s+/).filter(Boolean).length;
           const now = new Date(), ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-          
-          // 1. Save JSON to Drive
           const entry = { text, duration: 0, audioFileId: null, createdAt: now.toISOString(), topic, subtopic: sub || '', mood: S.qnMood, wordCount: words, isTextOnly: true };
           await uploadMultipart({ name: `vj_entry_${ts}.json`, parents: [S.folderId], mimeType: 'application/json' }, new Blob([JSON.stringify(entry)], { type: 'application/json' }));
-          
-          // 2. NEW: Save to Google Sheets
-          const sheetId = await getOrCreateSheet();
-          const dateStr = now.toLocaleDateString('en-US');
-          const timeStr = now.toLocaleTimeString('en-US');
-          const fullTopic = sub ? `${topic} > ${sub}` : topic;
-          await appendRowToSheet(sheetId, [fullTopic, text, dateStr, timeStr]);
-
           ensureMasterEntry(topic, sub).catch(() => { });
           toast('Note saved ✓', 'success'); S.qnMood = null;
           showScreen('home'); await loadEntries(); renderHomeExtras();
