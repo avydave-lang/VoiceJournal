@@ -1783,6 +1783,16 @@
       font-size: 28px;
       margin-bottom: 10px
     }
+    /* ── GROQ KEY MODAL ── */
+    .key-input-wrap { position: relative; margin: 16px 0 8px }
+    .key-input { width: 100%; background: var(--surf); border: 1px solid var(--bdr2); border-radius: var(--r1); padding: 12px 44px 12px 14px; color: var(--t1); font-size: 14px; font-family: inherit }
+    .key-input:focus { outline: none; border-color: var(--p) }
+    .key-input::placeholder { color: var(--t3) }
+    .key-toggle { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--t2); cursor: pointer; padding: 4px; font-size: 16px }
+    .key-hint { font-size: 11px; color: var(--t3); line-height: 1.5; margin-bottom: 4px }
+    .key-status { font-size: 12px; margin: 8px 0; min-height: 18px }
+    .key-status.ok  { color: var(--ok) }
+    .key-status.err { color: var(--danger) }
     /* ── WHISPER BANNER ── */
     .whisper-banner {
       display: none;
@@ -1861,6 +1871,9 @@
             <svg viewBox="0 0 24 24">
               <path d="M5 9.2h3V19H5zM10.6 5h2.8v14h-2.8zm5.6 8H19v6h-2.8z" />
             </svg>
+          </button>
+          <button class="icon-btn" id="btn-groq-key" title="Groq API Key">
+            <svg viewBox="0 0 24 24"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
           </button>
           <button class="icon-btn" id="btn-lang" title="Language">
             <svg viewBox="0 0 24 24">
@@ -2124,6 +2137,23 @@
     </div>
 
     <!-- LANGUAGE MODAL -->
+    <div class="modal-overlay" id="groq-modal">
+      <div class="modal-sheet">
+        <div class="modal-title">Groq API Key</div>
+        <div class="modal-sub">Your key is saved privately to your Google Drive — never in this app's code or GitHub.</div>
+        <div class="key-input-wrap">
+          <input class="key-input" id="groq-key-input" type="password" placeholder="gsk_…" autocomplete="off" spellcheck="false">
+          <button class="key-toggle" id="groq-key-toggle" title="Show/hide">👁</button>
+        </div>
+        <div class="key-hint">Get a free key at console.groq.com → API Keys → Create. 7,200 sec/day free — more than enough for daily journaling.</div>
+        <div class="key-status" id="groq-key-status"></div>
+        <div class="modal-actions">
+          <button class="modal-cancel" id="groq-modal-cancel">Cancel</button>
+          <button class="modal-confirm" id="groq-modal-save">Save to Drive</button>
+        </div>
+      </div>
+    </div>
+
     <div class="modal-overlay" id="lang-modal">
       <div class="modal-sheet">
         <div class="modal-title">Transcription Language</div>
@@ -2202,7 +2232,7 @@
 
       // ── STATE ──
       const S = {
-        token: null, folderId: null, entries: [],
+        token: null, folderId: null, entries: [], groqKey: null, configFileId: null,
         currentEntryData: null, currentAudioBlob: null,
         isRecording: false, recStart: null, recInterval: null,
         transcriptionDeferred: false,
@@ -2392,7 +2422,7 @@
         updateHomeDate();
         try {
           S.folderId = await getOrCreateFolder();
-          await Promise.all([loadEntries(), loadMasterTopics()]);
+          await Promise.all([loadEntries(), loadMasterTopics(), loadConfig()]);
           renderHomeExtras();
         } catch (e) { toast('Drive error: ' + e.message, 'error'); }
       }
@@ -2402,6 +2432,102 @@
         S.token = null; S.folderId = null; S.entries = [];
         localStorage.removeItem('vj_was_signed_in');
         showScreen('auth');
+      }
+
+      // ── GROQ CONFIG (stored in Drive) ──
+      const CONFIG_FILENAME = 'vj_config.json';
+
+      async function loadConfig() {
+        // Try localStorage cache first for speed
+        const cached = localStorage.getItem('vj_groq_key');
+        if (cached) S.groqKey = cached;
+
+        // Always sync from Drive (authoritative source, works across devices)
+        try {
+          const q = encodeURIComponent(`'${S.folderId}' in parents and name='${CONFIG_FILENAME}' and trashed=false`);
+          const r = await api(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`);
+          const files = (await r.json()).files;
+          if (files.length) {
+            S.configFileId = files[0].id;
+            const cfg = await getFileJson(S.configFileId);
+            if (cfg.groqApiKey) {
+              S.groqKey = cfg.groqApiKey;
+              localStorage.setItem('vj_groq_key', cfg.groqApiKey);
+            }
+          }
+        } catch (e) { /* non-fatal — fall back to cached key */ }
+      }
+
+      async function saveConfig(groqApiKey) {
+        const cfg = { groqApiKey };
+        const blob = new Blob([JSON.stringify(cfg)], { type: 'application/json' });
+        if (S.configFileId) {
+          await updateFileJson(S.configFileId, cfg);
+        } else {
+          S.configFileId = await uploadMultipart(
+            { name: CONFIG_FILENAME, parents: [S.folderId], mimeType: 'application/json' },
+            blob
+          );
+        }
+        S.groqKey = groqApiKey;
+        localStorage.setItem('vj_groq_key', groqApiKey);
+      }
+
+      // ── GROQ TRANSCRIPTION ──
+      async function transcribeWithGroq(blob) {
+        if (!S.groqKey) return null;
+        const banner = $('whisper-banner');
+        const title  = $('whisper-title');
+        const sub    = $('whisper-sub');
+        const prog   = $('whisper-prog');
+
+        banner.classList.add('active');
+        title.textContent = '🎙 Transcribing…';
+        sub.textContent   = 'Sending to Groq (fast, free, private to you)';
+        prog.style.width  = '30%';
+
+        try {
+          const ext  = blob.type.includes('mp4') ? 'm4a' : 'webm';
+          const form = new FormData();
+          form.append('file', blob, `audio.${ext}`);
+          form.append('model', 'whisper-large-v3');
+          form.append('response_format', 'json');
+          const langCode = (S.lang || 'en-US').split('-')[0].toLowerCase();
+          if (langCode) form.append('language', langCode);
+
+          prog.style.width = '70%';
+          const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${S.groqKey}` },
+            body: form
+          });
+
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err?.error?.message || `HTTP ${r.status}`);
+          }
+
+          const data = await r.json();
+          const text = (data.text || '').trim();
+          prog.style.width = '100%';
+
+          $('review-textarea').value = text;
+          S.transcript = text;
+          S.transcriptionDeferred = false;
+          updateWordCount();
+
+          title.textContent = '✅ Transcription complete';
+          sub.textContent   = 'Edit below if needed';
+          setTimeout(() => { banner.classList.remove('active'); prog.style.width = '0%'; }, 1500);
+          return text;
+
+        } catch (err) {
+          console.error('Groq error:', err);
+          title.textContent = '⚠️ Transcription failed';
+          sub.textContent   = err.message || 'Type your thoughts below';
+          prog.style.width  = '0%';
+          return null;
+        }
       }
 
       // ── HOME ──
@@ -2608,78 +2734,6 @@
         });
       }
 
-      // ── LOCAL WHISPER TRANSCRIPTION ──
-      let _whisperPipe = null;
-
-      async function runWhisper(blob) {
-        const banner = $('whisper-banner');
-        const title  = $('whisper-title');
-        const sub    = $('whisper-sub');
-        const prog   = $('whisper-prog');
-
-        banner.classList.add('active');
-        title.textContent = '🤖 Loading AI model…';
-        sub.textContent   = 'First use: ~40MB download, then cached on your device';
-        prog.style.width  = '5%';
-
-        try {
-          if (!_whisperPipe) {
-            const { pipeline, env } = await import(
-              'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js'
-            );
-            env.allowLocalModels = false;
-            _whisperPipe = await pipeline(
-              'automatic-speech-recognition',
-              'Xenova/whisper-tiny',
-              {
-                progress_callback: info => {
-                  if (info.status === 'downloading') {
-                    const pct = info.total
-                      ? Math.round((info.loaded / info.total) * 85)
-                      : 10;
-                    prog.style.width = pct + '%';
-                    const mb = ((info.loaded || 0) / 1e6).toFixed(1);
-                    sub.textContent = `Downloading… ${mb} MB`;
-                  }
-                }
-              }
-            );
-          }
-
-          title.textContent = '🎙 Transcribing your audio…';
-          sub.textContent   = 'Running entirely on your device — no internet needed';
-          prog.style.width  = '90%';
-
-          const blobUrl  = URL.createObjectURL(blob);
-          const langCode = (S.lang || 'en-US').split('-')[0].toLowerCase();
-          const result   = await _whisperPipe(blobUrl, {
-            language: langCode === 'en' ? 'english' : langCode,
-            task: 'transcribe',
-            chunk_length_s: 30
-          });
-          URL.revokeObjectURL(blobUrl);
-
-          prog.style.width = '100%';
-          const text = (result.text || '').trim();
-          $('review-textarea').value = text;
-          S.transcript = text;
-          S.transcriptionDeferred = false;
-          updateWordCount();
-
-          title.textContent = '✅ Transcription complete';
-          sub.textContent   = 'Edit the text below if needed';
-          setTimeout(() => {
-            banner.classList.remove('active');
-            prog.style.width = '0%';
-          }, 1500);
-
-        } catch (err) {
-          console.error('Whisper error:', err);
-          title.textContent = '⚠️ Transcription failed';
-          sub.textContent   = err.message || 'You can still type your thoughts below';
-          prog.style.width  = '0%';
-        }
-      }
 
       $('btn-stop').addEventListener('click', async () => {
         $('btn-stop').disabled = true;
@@ -2689,9 +2743,18 @@
           S.currentAudioDuration = duration;
           setupReviewScreen(blob, duration);
           showScreen('review');
-          // If live STT captured nothing, run local Whisper automatically
+          // If live STT captured nothing, transcribe via Groq
           if (!S.transcript.trim()) {
-            runWhisper(blob);
+            if (S.groqKey) {
+              transcribeWithGroq(blob);
+            } else {
+              // No key yet — nudge user to set it up
+              const banner = $('whisper-banner');
+              $('whisper-title').textContent = '🔑 Set up transcription';
+              $('whisper-sub').textContent   = 'Tap the key icon in the header to add your free Groq API key.';
+              $('whisper-prog').style.width  = '0%';
+              banner.classList.add('active');
+            }
           }
         } finally { $('btn-stop').disabled = false; }
       });
@@ -2954,6 +3017,42 @@
       $('btn-an-back').addEventListener('click', () => showScreen('home'));
       $('btn-lang').addEventListener('click', openLangModal);
       $('lang-close').addEventListener('click', () => $('lang-modal').classList.remove('open'));
+
+      // ── GROQ KEY MODAL ──
+      $('btn-groq-key').addEventListener('click', () => {
+        $('groq-key-input').value = S.groqKey || '';
+        $('groq-key-input').type  = 'password';
+        $('groq-key-toggle').textContent = '👁';
+        $('groq-key-status').textContent = S.groqKey ? '✅ Key loaded from Drive' : '';
+        $('groq-key-status').className   = 'key-status' + (S.groqKey ? ' ok' : '');
+        $('groq-modal').classList.add('open');
+      });
+      $('groq-key-toggle').addEventListener('click', () => {
+        const inp = $('groq-key-input');
+        inp.type = inp.type === 'password' ? 'text' : 'password';
+        $('groq-key-toggle').textContent = inp.type === 'password' ? '👁' : '🙈';
+      });
+      $('groq-modal-cancel').addEventListener('click', () => $('groq-modal').classList.remove('open'));
+      $('groq-modal-save').addEventListener('click', async () => {
+        const key = $('groq-key-input').value.trim();
+        if (!key.startsWith('gsk_')) {
+          $('groq-key-status').textContent = '⚠️ Key should start with gsk_';
+          $('groq-key-status').className   = 'key-status err';
+          return;
+        }
+        const btn = $('groq-modal-save');
+        btn.disabled = true; btn.textContent = 'Saving…';
+        $('groq-key-status').textContent = '';
+        try {
+          await saveConfig(key);
+          $('groq-key-status').textContent = '✅ Saved to your Google Drive';
+          $('groq-key-status').className   = 'key-status ok';
+          setTimeout(() => $('groq-modal').classList.remove('open'), 1200);
+        } catch (e) {
+          $('groq-key-status').textContent = '⚠️ Save failed: ' + e.message;
+          $('groq-key-status').className   = 'key-status err';
+        } finally { btn.disabled = false; btn.textContent = 'Save to Drive'; }
+      });
       $('btn-qn-back').addEventListener('click', () => showScreen('home'));
       $('btn-qn-save').addEventListener('click', saveQuickNote);
       $('btn-export').addEventListener('click', exportWeek);
